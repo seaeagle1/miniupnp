@@ -1,9 +1,9 @@
-/* $Id: upnphttp.c,v 1.108 2019/10/05 18:05:13 nanard Exp $ */
+/* $Id: upnphttp.c,v 1.111 2021/05/22 21:34:12 nanard Exp $ */
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
  * Project :  miniupnp
- * Website :  http://miniupnp.free.fr/ or http://miniupnp.tuxfamily.org/
+ * Website :  http://miniupnp.free.fr/ or https://miniupnp.tuxfamily.org/
  * Author :   Thomas Bernard
- * Copyright (c) 2005-2020 Thomas Bernard
+ * Copyright (c) 2005-2021 Thomas Bernard
  * This software is subject to the conditions detailed in the
  * LICENCE file included in this distribution.
  * */
@@ -29,7 +29,7 @@
 #include "upnpsoap.h"
 #include "upnpevents.h"
 #include "upnputils.h"
-#ifdef RANDOMIZE_URLS
+#if defined(RANDOMIZE_URLS) || defined(DYNAMIC_OS_VERSION)
 #include "upnpglobalvars.h"
 #endif /* RANDOMIZE_URLS */
 
@@ -1103,12 +1103,11 @@ BuildHeader_upnphttp(struct upnphttp * h, int respcode,
                      const char * respmsg,
                      int bodylen)
 {
-	int templen;
+	int templen = sizeof(httpresphead) + 256 + bodylen;
 	if(!h->res_buf ||
-	   h->res_buf_alloclen < ((int)sizeof(httpresphead) + 256 + bodylen)) {
+	   h->res_buf_alloclen < templen) {
 		if(h->res_buf)
 			free(h->res_buf);
-		templen = sizeof(httpresphead) + 256 + bodylen;
 		h->res_buf = (char *)malloc(templen);
 		if(!h->res_buf) {
 			syslog(LOG_ERR, "malloc error in BuildHeader_upnphttp()");
@@ -1118,10 +1117,14 @@ BuildHeader_upnphttp(struct upnphttp * h, int respcode,
 	}
 	h->res_sent = 0;
 	h->res_buflen = snprintf(h->res_buf, h->res_buf_alloclen,
-	                         httpresphead, h->HttpVer,
+	                         httpresphead, h->HttpVer,	/* HTTP/x.x */
 	                         respcode, respmsg,
-	                         (h->respflags&FLAG_HTML)?"text/html":"text/xml; charset=\"utf-8\"",
-							 bodylen);
+	                         (h->respflags&FLAG_HTML)?"text/html":"text/xml; charset=\"utf-8\"",	/* Content-Type: */
+	                         bodylen		/* Content-Length: */
+#ifdef DYNAMIC_OS_VERSION
+	                         , os_version	/* Server: */
+#endif
+	                        );
 	/* Content-Type MUST be 'text/xml; charset="utf-8"' according to UDA v1.1 */
 	/* Content-Type MUST be 'text/xml' according to UDA v1.0 */
 	/* Additional headers */
@@ -1281,63 +1284,8 @@ SendResp_upnphttp(struct upnphttp * h)
 void
 SendRespAndClose_upnphttp(struct upnphttp * h)
 {
-	ssize_t n;
-
-	while (h->res_sent < h->res_buflen)
-	{
-#ifdef ENABLE_HTTPS
-		if(h->ssl) {
-			n = SSL_write(h->ssl, h->res_buf + h->res_sent,
-			         h->res_buflen - h->res_sent);
-		} else {
-			n = send(h->socket, h->res_buf + h->res_sent,
-			         h->res_buflen - h->res_sent, 0);
-		}
-#else
-		n = send(h->socket, h->res_buf + h->res_sent,
-		         h->res_buflen - h->res_sent, 0);
-#endif
-		if(n<0)
-		{
-#ifdef ENABLE_HTTPS
-			if(h->ssl) {
-				int err;
-				err = SSL_get_error(h->ssl, n);
-				if(err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-					/* try again later */
-					h->state = ESendingAndClosing;
-					return;
-				}
-				syslog(LOG_ERR, "SSL_write() failed");
-				syslogsslerr();
-				break; /* avoid infinite loop */
-			} else {
-#endif
-			if(errno == EINTR)
-				continue;	/* try again immediately */
-			if(errno == EAGAIN || errno == EWOULDBLOCK)
-			{
-				/* try again later */
-				h->state = ESendingAndClosing;
-				return;
-			}
-			syslog(LOG_ERR, "send(res_buf): %m");
-			break; /* avoid infinite loop */
-#ifdef ENABLE_HTTPS
-			}
-#endif
-		}
-		else if(n == 0)
-		{
-			syslog(LOG_ERR, "send(res_buf): %d bytes sent (out of %d)",
-							h->res_sent, h->res_buflen);
-			break;
-		}
-		else
-		{
-			h->res_sent += n;
-		}
-	}
-	CloseSocket_upnphttp(h);
+	if (SendResp_upnphttp(h))
+		CloseSocket_upnphttp(h);
+	else
+		h->state = ESendingAndClosing;
 }
-
